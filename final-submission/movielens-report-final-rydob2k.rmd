@@ -1,0 +1,543 @@
+---
+title: "MovieLens Project Report"
+author: "Ryan Dobler - rydob2k"
+date: "2023-10-31"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = TRUE)
+```
+
+## Objective
+
+The goal of this project was to develop an algorithm for predicting movie ratings from a data set of user and movie information, similar to the Netflix Prize competition.
+
+
+## 1. Introduction and Abstract
+
+In 2006, Netflix hosted a competition where a prize of US$1 million was offered to contestants who could submit the best collaborative filtering algorithm for predicting user ratings for movies based on a data set of over 100 million ratings. The algorithms had to beat Netflix's algorithm by 10%. Evaluation of the contestants models was done by comparing the root mean squared errors of the models.  
+  
+Many companies such as Netflix and Amazon use User-Item collaborative filtering algorithms for recommending items to their customers. These recommendation systems use machine learning models to maximize their effectiveness. The motivation for this project was to create a model for predicting movie ratings from a previously available data set from the GroupLens group. This data set was a collection of user and movie ratings that had a timestamp for each rating. Also, each movie was associated with a title and a set of genres that could be used in analysis.   
+  
+### *Abstract*  
+
+
+This project was executed in RStudio using the R programming language. In order to mimic the Netflix Prize challenge, a final holdout test set and a training data set were partitioned for model development. The root mean squared error (RMSE) was used to evaluate the effectiveness of the models. The 10M MovieLens data set was imported from GroupLens, then organized and cleaned for analysis. After exploratory analysis, several models were developed and ultimately a matrix factorization model was selected.  
+  
+The final reportable RMSE was `0.8332669`.
+
+
+## 2. Methods and Analysis
+
+The overall strategy for this project was to import the data set, clean and wrangle the data for analysis, explore and visualize the data, develop an effective model for predicting ratings, and test the performance of the model on a hold-out data set.
+
+
+### *Data Import*  
+
+
+Data were organized, prepared, and analyzed in Rstudio using the following packages:  
+- `library(tidyverse)`  
+- `library(caret)`  
+- `library(qdaptools)`  
+- `library(recosystem)`  
+
+```{r load-packages, include=FALSE}
+if(!require(tidyverse)) {install.packages("tidyverse", repos = "http://cran.us.r-project.org"); library(tidyverse)}
+if(!require(caret)) {install.packages("caret", repos = "http://cran.us.r-project.org"); library(caret)}
+if(!require(qdapTools)) {install.packages("qdapTools", repos = "http://cran.us.r-project.org"); library(qdapTools)}
+if(!require(recosystem)) {install.packages("recosystem", repos = "http://cran.us.r-project.org"); library(recosystem)}
+if(!require(knitr)) {install.packages("knitr", repos = "http://cran.us.r-project.org"); library(knitr)}
+```
+
+The MovieLens 10M data set was made available through GroupLens, a research group that explores Information Filtering and Recommender Systems ([MovieLens 10M Summary](https://files.grouplens.org/datasets/movielens/ml-10m-README.html)). The data set was downloaded from the GroupLens website and imported to Rstudio for cleaning and reshaping.
+  
+After download, the MovieLens 10M file was unzipped into its component files: a `ratings.dat` file containing the user, movie, and timestamp for each rating, and a `movies.dat` file containing the movieId, title, and genres information. A third file `tags.dat` was not used for this project.
+    
+```{r download-file, echo=FALSE, cache=TRUE}
+# Download MovieLens 10M file and unzip to component files: ratings_file and movies_file
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+# Organize ratings_file as data frame, name and classify variables/columns
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+# Repeat for movies_file, add column names and classes
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+```
+
+  
+
+### *Cleaning and Wrangling*  
+
+
+The data were prepared for analysis using functions from `library(tidyverse)`. The `ratings.dat` and `movies.dat` files were organized into data frames and reshaped into tidy format, where each row is an observation and each column represents a variable, and the data are values in those respective 'cells' of the data frame. Tidy data are much more useful to work with when performing data exploration and analysis.
+
+Several techniques were employed to clean and wrangle the data for exploration. Variables were defined using string processing and their values assigned with `str_split`. Variables were then renamed for interpretability.
+
+Once the separate ratings and movies files were processed, they were combined to create a unified data set `movielens`.
+
+In order to imitate the Netflix Prize challenge, the `movielens` data set was partitioned into a main training set and a final hold-out test set. The final hold-out data were reserved for testing the final model. From the main training set, another partition was made for training and testing algorithms.
+ 
+```{r partition-data, echo=TRUE, cache=TRUE, warning=FALSE}
+# Final hold-out test set is 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+
+# Remove non-relevant objects prior to analysis
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```  
+
+```{r partition-train-test-sets, echo=TRUE, cache=TRUE}
+# Partition edx into training and test sets
+set.seed(10)
+edx_test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE)
+train_edx <- edx[-edx_test_index,]
+temp2 <- edx[edx_test_index,]
+
+# Make sure userId and movieId in test set are also in train set to avoid NAs
+test_edx <- temp2 %>% 
+  semi_join(train_edx, by = "movieId") %>%
+  semi_join(train_edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp2, test_edx)
+train_edx <- rbind(train_edx, removed)
+
+# Clean up unused object from environment
+rm(edx_test_index, temp2, removed)
+```
+  
+  
+
+### *Data Exploration*  
+
+
+The MovieLens 10M data set consists of over 10 million ratings from more than 75,000 users and 10,000 movie titles. These were organized into a training and final testing set as described above.
+```{r edx-overview, echo=TRUE, include=TRUE}
+kable(head(edx, n=10))
+```
+
+```{r edx-structure, echo=TRUE, include=TRUE}
+str(edx)
+```
+
+```{r n-users-movies, echo=TRUE, include=TRUE}
+n_users_movies <- edx %>% summarize(Users = n_distinct(userId), 
+                  Movies = n_distinct(movieId))
+kable(n_users_movies)
+```
+We can see that the training data set (edx) has variables for users, movies, ratings, rating timestamp, movie title, and the movie genres. The *userId* and *movieId* variables are `class = integer`, while the *ratings* are `class = numeric`.  
+  
+
+###### *USERS*  
+      
+```{r user-ratings, include=FALSE}
+user_ratings <- edx %>% group_by(userId) %>% 
+  summarize(n_ratings = n(), median_rating = median(rating), avg_rating = round(mean(rating), digits = 1))
+```
+  
+The average number of ratings per user was ```r round(mean(user_ratings$n_ratings))```, but the majority of users rated less than ```r median(user_ratings$n_ratings)``` movies. This suggests that the distribution of the number of ratings is skewed.   
+      
+```{r user-distribution, echo=FALSE, include=TRUE}
+user_ratings %>% filter(n_ratings <= (0.10)*max(n_ratings)) %>% 
+  ggplot(aes(n_ratings)) + geom_histogram(binwidth = 10) +
+  ggtitle("Distribution of Number of Ratings per User")
+```
+  
+Additionally, there was a large variation in the average rating given by a user, as seen in the plot below. The average movie rating per user was ```r mean(user_ratings$avg_rating)```, while the average rating was ```r mean(edx$rating)```. This ```r 100*(mean(user_ratings$avg_rating)-(mean(edx$rating)))/mean(edx$rating)``` percent difference indicates some level of user bias impacting the rating.    
+      
+```{r avg-user-rating-distribution, include=TRUE}
+user_ratings %>% filter(n_ratings >= 30) %>% ggplot(aes(avg_rating)) + geom_histogram(bins = 20) +
+  ggtitle("Average Movie Rating per User")
+```
+  
+
+###### *MOVIES*  
+  
+```{r movie-ratings}
+movie_ratings <- edx %>% group_by(movieId) %>% 
+  summarize(title = title[1], i_ratings = n(), avg_i_rating = round(mean(rating), digits = 1))
+```
+  
+The average rating per movie was ```r mean(movie_ratings$avg_i_rating)```, a percent difference of ```r 100*(mean(movie_ratings$avg_i_rating)-(mean(edx$rating)))/mean(edx$rating)```. This difference again indicates that there is an impact from the movie effect on the rating value. Looking at the distribution of movie ratings below, we see only a slight skew compared to the user ratings distribution.  
+  
+```{r movie-ratings-distribution}
+histogram(movie_ratings$avg_i_rating)
+```
+  
+Also, only ```r 100*sum(movie_ratings$avg_i_rating >= 4) / length(movie_ratings$avg_i_rating)``` percent of movies had an average rating of 4 stars, totalling ```r (sum(movie_ratings$avg_i_rating >= 4) / length(movie_ratings$avg_i_rating)) * n_distinct(edx$movieId)``` films. Looking at the top ten of these movies below, we see some obscure titles with few ratings, meaning that there is some bias that needs to be accounted for in the final ratings model.  
+  
+```{r top-10-movies, include=TRUE}
+kable(slice_max(movie_ratings, order_by = avg_i_rating, n = 10), caption = "Top 10 Rated Movies")
+```
+  
+
+###### *GENRES*  
+  
+Some exploration was done in order to account for effects related to the genres of the movies themselves. The genres were grouped just by themselves as they were listed in the original MovieLens data set. However, those groupings gave a neglible impact on the RMSE of the baseline model and so the genres were modeled directly.  
+  
+The genres were separated into individual variables, into a 'one hot' encoded format. The genres were then assessed with a linear model and that term was added into the baseline model above. An *increase* in the RMSE over the original baseline was observed and the GENRE_EFFECT term was ultimately not included in the final model.  
+
+      
+
+### *Model Development*  
+
+###### *BASELINE MODEL*  
+
+A baseline linear model was developed using a least squares estimate of the mean rating in order to minimize the root mean squared error (RMSE).
+```{r RMSE-formula, echo=TRUE}
+# Created 'RMSE' function for comparing model success
+RMSE <- function(actual_ratings, predicted_ratings){
+  sqrt(mean((actual_ratings - predicted_ratings)^2))
+}
+```
+  
+```{r mu-RMSE, echo=TRUE}
+# For baseline model:
+mu <- mean(train_edx$rating)
+
+# and RMSE = 1.0598106
+base_0_rmse <- RMSE(test_edx$rating, mu)
+```
+  
+      
+Variables were tested based on the data exploration and included terms for the mean rating and bias from user effects, movie effects, and genre effects.  
+  
+>**Baseline Model:**  
+>  
+>*RATING = AVG_RATING + USER_EFFECT + MOVIE_EFFECT + GENRE_EFFECT*  
+> 
+>$Y = µ + b_{u} + b_{i} + b_{g}$  
+
+<br>  
+The bias from the USER_EFFECT $b_{u}$ was taken as simply the difference between the observed rating and the overall average rating mu.
+
+```{r baseline-user-effect, echo=TRUE}
+# Compute user average rating and find difference from mu (bu_1 = Y - mu)
+bu_1 <- train_edx %>% group_by(userId) %>%
+  summarize(bu_1 = mean(rating - mu))
+
+# Predict rating from mu and user effect bu_1 (Y = mu + bu_1)
+pred_bu_1 <- test_edx %>%
+  left_join(bu_1, by = "userId") %>% 
+  mutate(pred = mu + bu_1) %>%
+  pull(pred)
+
+# And calculate RMSE
+base_1_RMSE <- RMSE(test_edx$rating, pred_bu_1)
+```
+<br>  
+The bias from the MOVIE_EFFECT $b_{i}$ was the difference between the observed rating, mu, and $b_{u}$.  
+
+```{r baseline-movie-effect, echo=TRUE}
+# Compute movie average rating and find difference from mu + bu_1 (bi_1 = Y - mu - bu_1)
+bi_1 <- train_edx %>% 
+  group_by(movieId) %>%
+  left_join(bu_1, by = "userId") %>% 
+  summarize(bi_1 = mean(rating - mu - bu_1))
+
+# Predict rating from mu and user effect bu_1 (Y = mu + bu_1)
+pred_bu_bi_1 <- test_edx %>%
+  left_join(bu_1, by = "userId") %>%
+  left_join(bi_1, by = "movieId") %>%
+  mutate(pred = mu + bu_1 + bi_1) %>% 
+  pull(pred)
+
+# And calculate RMSE
+base_2_RMSE <- RMSE(test_edx$rating, pred_bu_bi_1)
+```
+<br>  
+The initial GENRE_EFFECT $b_{g}$ was calculated as the difference between the observed rating, mu, $b_{u}$, and $b_{i}$.
+
+```{r baseline-genre-effect, echo=TRUE}
+# Compute rating from genre factor and find difference from mu + bu_1 + bi_1 (bg_1 = Y - mu + bu_1 + bi_1)
+bg_1 <- train_edx %>% 
+  left_join(bu_1, by = "userId") %>%
+  left_join(bi_1, by = "movieId") %>%
+  group_by(genres) %>%
+  summarize(bg_1 = mean(rating - mu - bu_1 - bi_1))
+
+# Predict BASELINE model rating from mu and initial USER, MOVIE, and GENRE effects
+# Y = mu + bu + bi + bg
+pred_bu_bi_bg_1 <- test_edx %>%
+  left_join(bu_1, by = "userId") %>%
+  left_join(bi_1, by = "movieId") %>%
+  left_join(bg_1, by = "genres") %>% 
+  mutate(pred = mu + bu_1 + bi_1 + bg_1) %>%
+  pull(pred)
+
+# And calculate BASELINE RMSE
+baseline_rmse <- RMSE(test_edx$rating, pred_bu_bi_bg_1)
+```
+
+After establishing the baseline model from the USER, MOVIE, and GENRE effects, it was observed that the genre effect was negligible. This variable was subsequently left out of the baseline model.  
+  
+The GENRE effect was further explored by splitting the `genres` category into its component genre items respectively. This was accomplished using one hot encoding using the `library(qdaptools)` package. Each genre was given its column and became a '1' if present in that rating's `genres` field or a '0' if not present. Once the genres were split, a linear model was trained for predicting the rating from the extracted genres. The new GENRE effect with a linear model was evaluated with the baseline model and produced a higher RMSE than the baseline only.  
+  
+```{r genre-splitting, include=FALSE, cache=TRUE}
+# Add object to store genre names
+all_genres <- unique(unlist(str_split(edx$genres,"\\|"))) [-20]
+
+# PRE-PROCESSING: Add expanded genres to edx data set, one-hot encoding
+edx_temp <- edx %>%
+  cbind(mtabulate(str_split(edx$genres, "\\|"))) %>%
+  select(-genres, -"(no genres listed)")
+
+# Partition edx into training and test sets
+set.seed(10)
+edx_test_index <- createDataPartition(y = edx_temp$rating, times = 1, p = 0.1, list = FALSE)
+train_edx_genres <- edx_temp[-edx_test_index,]
+temp3 <- edx_temp[edx_test_index,]
+
+# Make sure userId and movieId in test set are also in train set to avoid NAs
+test_edx_genres <- temp3 %>% 
+  semi_join(train_edx_genres, by = "movieId") %>%
+  semi_join(train_edx_genres, by = "userId")
+
+# Add rows removed from test set back into edx set
+removed <- anti_join(temp3, test_edx_genres)
+train_edx_genres <- rbind(train_edx_genres, removed)
+
+# Clean up unused objects from environment
+rm(edx_temp, edx_test_index, temp3, removed)
+```
+
+```{r genres-model-lm, include=FALSE}
+# Train linear model for genre predictor
+bg_lm <- train_edx_genres %>% select(rating, all_of(all_genres)) %>% lm(rating ~ ., data = .)
+
+# Compute rating from genre factor and find difference from mu
+temp_bg_2 <- test_edx_genres %>%
+  left_join(bu_1, by = "userId") %>%
+  left_join(bi_1, by = "movieId")
+
+bg_2 <- temp_bg_2 %>% mutate(bg_2 = mu - predict(bg_lm, newdata = temp_bg_2)) 
+
+# UPDATED BASELINE model rating from mu and initial USER, MOVIE, and expanded GENRE effects
+# Y = mu + bu + bi + bg_lm
+
+pred_bu_bi_bg_lm <- bg_2 %>% 
+  mutate(pred = mu + bu_1 + bi_1 + bg_2) %>%
+  pull(pred)
+
+# And calculate BASELINE RMSE
+baseline2_rmse <- RMSE(pred_bu_bi_bg_lm, test_edx$rating)
+```
+  
+###### *REGULARIZED LINEAR BASELINE*  
+  
+The USER and MOVIE effect variables in the baseline model were further improved by adding a regularization term to penalize estimate ratings with large variability that affected the best (and worst) rankings of obscure movies, i.e. users or movies that had few ratings of high and/or low values. As the penalty term lambda increases, the estimate shrinks toward the mean and thus allows a better representation of the true value.  
+```{r regulizer, echo=TRUE}
+# Set overall average rating
+overall <- mean(train_edx$rating)
+
+# Regularization function for lambda
+regulizer <- function(lambda, training, testing){
+  # Define predictors:
+  bu <- training %>% 
+    group_by(userId) %>% 
+    summarize(bu = sum(rating - overall)/(n() + lambda))
+  bi <- training %>% 
+    left_join(bu, by = "userId") %>%
+    group_by(movieId) %>%
+    summarize(bi = sum(rating - bu - overall)/(n() + lambda))
+  # Predict ratings:
+  preds <- testing %>%
+    left_join(bu, by = "userId") %>%
+    left_join(bi, by = "movieId") %>% 
+    mutate(pred = overall + bu + bi) %>%
+    pull(pred)
+  return(RMSE(preds, testing$rating))
+}
+```
+  
+Lambda was selected and tuned by minimizing the RMSE.  
+```{r lambda-selection, cache=TRUE}
+# Tune lambda to yield best RMSE
+lambdas <- seq(0, 50, 1)
+
+lamb_results <- sapply(lambdas, regulizer,
+                       training = train_edx,
+                       testing = test_edx)
+```
+
+```{r lambda-plot}
+# Plot results
+tibble(Lambda = lambdas, RMSE = lamb_results) %>%
+  ggplot(aes(x = Lambda, y = RMSE)) +
+  geom_point()
+```
+  
+Next, lambda was applied to the baseline model, which improved the model RMSE nearly to the target for the project.  
+```{r lambda}
+lambda <- lambdas[which.min(lamb_results)]
+```
+
+
+```{r baseline-regularized, echo=TRUE}
+# Update baseline model with regularized USER and MOVIE effect, leave out GENRE negligible impact
+bu <- train_edx %>% 
+  group_by(userId) %>% 
+  summarize(bu = sum(rating - overall)/(n() + lambda))
+bi <- train_edx %>% 
+  left_join(bu, by = "userId") %>%
+  group_by(movieId) %>%
+  summarize(bi = sum(rating - bu - overall)/(n() + lambda))
+# Predict ratings:
+pred_bu_bi_reg <- test_edx %>%
+  left_join(bu, by = "userId") %>%
+  left_join(bi, by = "movieId") %>% 
+  mutate(pred = overall + bu + bi) %>%
+  pull(pred)
+baseline_reg_rmse <- RMSE(test_edx$rating, pred_bu_bi_reg)
+```
+
+  
+  
+###### *MATRIX FACTORIZATION MODEL*   
+  
+The winners of the Netflix Prize utilized matrix factorization in the winning model ([Koren 2009](https://www2.seas.gwu.edu/~simhaweb/champalg/cf/papers/KorenBellKor2009.pdf)). Matrix factorization is a machine learning tool used widely in user-item recommender systems like the ones used by Netflix, Amazon, etc. Interactions between the users and items (in our case movies) are arranged into a matrix with rows of users and columns of items. The values in our matrix were the ratings, and the algorithm attempts to fill in the missing values. This was very useful in working with the large data set in this project.  
+  
+The `recosystem` package was utilized to solve this matrix. It uses parallel matrix factorization. Briefly, `recosystem` takes an input data set, creates a model object, trains the model, and predicts the output. A detailed description can be found in the package [vignette](https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html).  
+```{r assign-reco-objects, cache=TRUE, echo=TRUE}
+# Convert the train and test data sets into input format for recosystem
+set.seed(50)
+train_rec <- with(train_edx, data_memory(user_index = userId,
+                                         item_index = movieId,
+                                         rating = rating))
+test_rec <- with(test_edx, data_memory(user_index = userId,
+                                       item_index = movieId,
+                                       rating = rating))
+
+# Assign the RecoSys object model:
+rec <- recosystem::Reco()
+```
+
+```{r reco-model, echo=TRUE}
+# Train the model with default tuning parameters
+mat_fit <- rec$train(train_rec)
+
+# Predict the ratings for the test set with the matrix factorization model
+pred_matrix <- rec$predict(test_rec, out_memory())
+```
+
+```{r matrix-RMSE, echo=TRUE}
+# Calculate the RMSE
+matrix_fact_rmse <- RMSE(test_edx$rating, pred_matrix)
+```
+  
+The matrix factorization model was applied to the training data and decreased the RMSE to below the target for the project.  
+
+## 3. Results
+
+The results of the modeling experiments above are as follows:  
+```{r model-comparison}
+model_comparison <- tibble(Model = c("Project Target", 
+                                     "Just the Average", 
+                                     "User Effect", 
+                                     "Baseline Model - User + Movie Effects",
+                                     "Baseline + Genre",
+                                     "Regularized Baseline - User and Movie",
+                                     "Matrix Factorization - User + Movie"),
+                           RMSE = c("< 0.86490", base_0_rmse, base_1_RMSE, base_2_RMSE, baseline2_rmse, baseline_reg_rmse, matrix_fact_rmse))
+```
+
+```{r model-results}
+kable(model_comparison)
+```
+  
+We can see that the baseline model that included the USER and MOVIE effects had an RMSE of ```r base_2_RMSE```.  
+  
+As mentioned above, when a linear model was applied to the GENRE term an increase in the RMSE over the baseline was noted. The new RMSE was ```r baseline2_rmse```. This model potentially could be included as part of an ensemble or developed further, but for the purposes of this project was left out of the final model.  
+  
+We were able to make subsequent improvements to the model by regularizing the baseline linear model for the USER and MOVIE terms and by applying a matrix factorization model, RMSEs ```r baseline_reg_rmse``` and ```r matrix_fact_rmse``` respectively.  
+  
+By regularizing the two terms for USER and MOVIE effects, we reduced the bias from individual users and movies leading to an increase in variability that influenced the model. The regularized baseline improved the RMSE to ```r baseline_reg_rmse``` but was still not meeting the project target RMSE of `< 0.86490`.  
+  
+In the matrix factorization model, the observed RMSE was ```r matrix_fact_rmse```, which surpassed the target `< 0.86490`. The matricized method allows a rating to be decomposed into latent factors that are detected and learned by the algorithm ([Chen](http://blog.echen.me/2011/10/24/winning-the-netflix-prize-a-summary/)). These latent factors can be thought of as categories like "blockbuster" or "sci-fi" or "Tom Cruise Movies" that are not readily discernible from the variables in the data set but that a computer can calculate the respective correlations based on the matrix of ratings data presented.  
+  
+###### *FINAL HOLDOUT TESTING AND FINAL RMSE*  
+  
+The matrix factorization model was selected for use in the final holdout testing as this model beat the target RMSE in development. The regularized baseline model was also run against the final holdout test set for comparison to the matrix model, but the final reportable RMSE was calculated using the matrix model.  
+  
+```{r final-RMSE-calc, include=FALSE}
+# Predict ratings on final holdout with Regularized Baseline linear model:
+pred_final_reg <- final_holdout_test %>%
+  left_join(bu, by = "userId") %>%
+  left_join(bi, by = "movieId") %>% 
+  mutate(pred = overall + bu + bi) %>%
+  pull(pred)
+final_reg_rmse <- RMSE(final_holdout_test$rating, pred_final_reg)
+
+# Predict ratings on final holdout with Matrix Factorization model:
+final_rec <- with(final_holdout_test, data_memory(user_index = userId,
+                                       item_index = movieId,
+                                       rating = rating))
+pred_final_matrix <- rec$predict(final_rec, out_memory())
+matrix_final_rmse <- RMSE(final_holdout_test$rating, pred_final_matrix)
+```
+
+```{r final-model-results}
+final_model_comparison <- tibble(Model = c("Project Target", 
+                                     "Final Regularized Baseline",
+                                     "Final Matrix Factorization"),
+                           RMSE = c("< 0.86490", 
+                                    final_reg_rmse,
+                                    matrix_final_rmse))
+kable(final_model_comparison)
+```
+  
+The final RMSE was calculated to be ```r matrix_final_rmse``` from the parallel matrix factorization model. We can see that this model beats the target and the RMSEs of the previous models. The next closest model was the regularized linear baseline model, shown above for comparison.
+
+## 4. Conclusion
+
+The objective of this project was to develop an algorithm for predicting movie ratings from the MovieLens 10M data set using R. Several techniques were utilized to achieve this purpose including data import and cleaning, data exploration, modeling, etc.  
+  
+Once the data were explored and visualized, a linear baseline model was developed capturing USER and MOVIE effects. This model was improved upon using regularization, and a parallel matrix factorization model was developed.  
+  
+The **final reportable RMSE of the project was ```r matrix_final_rmse```**, from evaluating the final holdout data with the matrix factorization model.  
+  
+###### *FUTURE STUDIES*  
+    
+The project goal was achieved using only two predictors, USER and MOVIE effects. There are many other possible predictors that might still be explored in order to further improve upon the final model's RMSE. These may be related to movie genres or temporal effects that can be elucidated with further study.  
+  
+Additionally, the Netflix Prize winners documented their use of gradient boosted decision trees (GBDTs) and advanced model blending techniques.  
+  
+Future work should be centered around these ideas. 
+  
